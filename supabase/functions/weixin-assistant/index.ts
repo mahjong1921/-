@@ -1575,8 +1575,13 @@ const TTS_TIMEOUT_MS = 60_000;
 const IMAGE_GENERATION_TIMEOUT_MS = 90_000;
 
 async function synthesizeVoiceDataUrl(text, voiceConfig) {
-  const cleanText = String(text || "").trim();
-  if (!cleanText || !voiceConfig || voiceConfig.enableTTS !== true) return "";
+  if (!voiceConfig || voiceConfig.enableTTS !== true) return "";
+  const supportsTags = voiceConfig.provider === "ElevenLabs" && ["eleven_v3", "eleven_v3_conversational", "eleven_v4", "eleven_v4_turbo"].includes(String(voiceConfig.model || "").trim());
+  const cleanText = String(text || "").replace(/\{voice:([^{}\r\n]*)\}/gi, (_match, rawCue) => {
+    const cue = rawCue.trim();
+    return supportsTags && /^[A-Za-z][A-Za-z ,'-]{0,99}$/.test(cue) ? `[${cue}]` : "";
+  }).trim();
+  if (!cleanText) return "";
   // 预算不足时跳过 TTS（外层降级为语音模板卡），保证整轮在墙钟内完成；
   // 实际请求超时同样按剩余预算收紧（预留 15s 给上传发送），避免擦到墙钟。
   const budget = remainingReplyBudgetMs();

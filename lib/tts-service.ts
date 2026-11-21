@@ -5,6 +5,18 @@ import { loadVoiceConfigs, loadBindingConfig, resolveBinding } from "./settings-
 
 export type VoiceApiConfigResolved = VoiceApiConfig;
 
+// Keep inline tone cues compatible with Float's outer [语音条:...] syntax.
+// Only models which understand native audio tags receive square brackets.
+const AUDIO_TAG_MODELS = new Set(["eleven_v3", "eleven_v3_conversational", "eleven_v4", "eleven_v4_turbo"]);
+
+export function prepareVoiceText(text: string, config: VoiceApiConfig): string {
+    const supportsTags = config.provider === "ElevenLabs" && AUDIO_TAG_MODELS.has(config.model?.trim() || "");
+    return text.replace(/\{voice:([^{}\r\n]*)\}/gi, (_match, rawCue: string) => {
+        const cue = rawCue.trim();
+        return supportsTags && /^[A-Za-z][A-Za-z ,'-]{0,99}$/.test(cue) ? `[${cue}]` : "";
+    });
+}
+
 /**
  * Resolve the TTS voice config for a character via the binding cascade.
  * Returns null if no voice config is bound or found.
@@ -32,6 +44,7 @@ export async function synthesizeSpeech(
     voiceConfig: VoiceApiConfig,
     options?: { emotion?: string },
 ): Promise<Blob | null> {
+    text = prepareVoiceText(text, voiceConfig);
     if (!text.trim()) return null;
 
     const provider = voiceConfig.provider;
@@ -196,7 +209,18 @@ async function synthesizeElevenLabs(text: string, config: VoiceApiConfig): Promi
         },
     );
     if (!response.ok) {
-        throw new Error(`ElevenLabs 语音合成失败 (${response.status})，请检查密钥权限、Voice ID、模型和账户额度`);
+        // ElevenLabs returns a structured error in detail. Show the useful
+        // code/message without printing the request, headers or API key.
+        const data = await response.json().catch(() => null);
+        const detail = data?.detail;
+        const safeText = (value: unknown): string => typeof value === "string"
+            ? value.split(apiKey).join("[已隐藏密钥]").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 700)
+            : "";
+        const code = safeText(detail?.code) || safeText(detail?.status) || safeText(data?.code);
+        const message = safeText(detail?.message) || safeText(detail) || safeText(data?.message)
+            || (Array.isArray(detail) ? detail.map(item => safeText(item?.msg)).filter(Boolean).join("；").slice(0, 700) : "");
+        const reason = [code, message].filter(Boolean).join("：");
+        throw new Error(`ElevenLabs 语音合成失败 (${response.status})${reason ? `：${reason}` : "，服务端未提供详细错误，请检查密钥权限、Voice ID、模型和账户额度"}`);
     }
     const blob = await response.blob();
     if (!blob.size || (!blob.type.startsWith("audio/") && blob.type !== "application/octet-stream")) {

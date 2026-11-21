@@ -25,7 +25,7 @@ const { resolveBinding } = load(compile("binding.ts", storage.slice(bindingStart
 const eleven = { id: "eleven", provider: "ElevenLabs", apiKey: "fake-key", defaultVoice: "voice123", enableTTS: true };
 const openai = { id: "openai", provider: "OpenAI", apiKey: "fake-openai", defaultVoice: "alloy" };
 const minimax = { id: "minimax", provider: "Minimax", apiKey: "fake-minimax", defaultVoice: "male-qn-qingse" };
-const { resolveVoiceConfig, synthesizeSpeech } = load(compile("lib/tts-service.ts"), {
+const { resolveVoiceConfig, synthesizeSpeech, prepareVoiceText } = load(compile("lib/tts-service.ts"), {
   "./settings-storage": {
     loadVoiceConfigs: () => [eleven, minimax, openai],
     loadBindingConfig: () => ({ globalDefaults: { voiceConfigId: "openai" }, characterBindings: [
@@ -61,8 +61,43 @@ assert.equal((await synthesizeSpeech("hello", openai)).type, "audio/mpeg");
 assert.match(calls[2].url, /audio\/speech$/);
 assert.equal((await synthesizeSpeech("hello", minimax)).type, "audio/mpeg");
 assert.match(calls[3].url, /t2a_v2$/);
+const spoken = "{voice:quietly} 嗯……{voice:soft chuckle} 你呀。";
+for (const model of ["eleven_v3", "eleven_v4", "eleven_v4_turbo"]) {
+  await synthesizeSpeech(spoken, { ...eleven, model });
+  assert.equal(JSON.parse(calls.at(-1).init.body).text, "[quietly] 嗯……[soft chuckle] 你呀。");
+}
+await synthesizeSpeech(spoken, { ...eleven, model: "eleven_multilingual_v2" });
+assert.equal(JSON.parse(calls.at(-1).init.body).text, " 嗯…… 你呀。");
+await synthesizeSpeech(spoken, openai);
+assert.equal(JSON.parse(calls.at(-1).init.body).input, " 嗯…… 你呀。");
+await synthesizeSpeech(spoken, minimax);
+assert.equal(JSON.parse(calls.at(-1).init.body).text, " 嗯…… 你呀。");
+assert.equal(prepareVoiceText("{voice:无效}你好 {ordinary}", { ...eleven, model: "eleven_v4" }), "你好 {ordinary}");
+assert.equal(await synthesizeSpeech("{voice:quietly}", { ...eleven, model: "eleven_multilingual_v2" }), null);
+
+const { parseAIResponse } = load(compile("lib/rich-message-parser.ts"), {
+  "./state-value-parser": load(compile("lib/state-value-parser.ts")),
+  "./action-parser": { stripActionShells: text => text },
+  "./text-tool-protocol": load(compile("lib/text-tool-protocol.ts")),
+  "./custom-app-chat-directives": { loadCustomAppChatDirectives: () => [] },
+});
+const voiceParts = parseAIResponse(`[语音条:${spoken}]`, []).parts;
+assert.equal(voiceParts.length, 1);
+assert.equal(voiceParts[0].mediaType, "audio");
+assert.equal(voiceParts[0].mediaData.label, spoken);
+await synthesizeSpeech(voiceParts[0].mediaData.label, { ...eleven, model: "eleven_v4" });
+assert.equal(JSON.parse(calls.at(-1).init.body).text, "[quietly] 嗯……[soft chuckle] 你呀。");
+const callParts = parseAIResponse(spoken, []).parts;
+assert.equal(callParts.length, 1);
+assert.equal(callParts[0].content, spoken);
 globalThis.fetch = async () => new Response("denied", { status: 401 });
 await assert.rejects(synthesizeSpeech("hello", eleven), /401/);
+globalThis.fetch = async () => Response.json({ detail: { status: "voice_not_found", message: "Voice missing" } }, { status: 400 });
+await assert.rejects(synthesizeSpeech("hello", eleven), /400.*voice_not_found.*Voice missing/);
+globalThis.fetch = async () => Response.json({ detail: { code: "invalid_request", message: "Invalid fake-key" } }, { status: 400 });
+await assert.rejects(synthesizeSpeech("hello", eleven), error => error.message.includes("invalid_request") && !error.message.includes("fake-key"));
+globalThis.fetch = async () => Response.json({ detail: [{ msg: "Invalid model" }] }, { status: 422 });
+await assert.rejects(synthesizeSpeech("hello", eleven), /422.*Invalid model/);
 globalThis.fetch = async () => Response.json({ message: "not audio" });
 await assert.rejects(synthesizeSpeech("hello", eleven), /有效音频/);
 
