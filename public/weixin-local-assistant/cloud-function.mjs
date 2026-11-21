@@ -1587,6 +1587,7 @@ async function synthesizeVoiceDataUrl(text, voiceConfig) {
   const provider = String(voiceConfig.provider || "").trim();
   if (provider === "Minimax") return synthesizeMinimaxVoiceDataUrl(cleanText, voiceConfig, timeoutMs);
   if (provider === "OpenAI") return synthesizeOpenAIVoiceDataUrl(cleanText, voiceConfig, timeoutMs);
+  if (provider === "ElevenLabs") return synthesizeElevenLabsVoiceDataUrl(cleanText, voiceConfig, timeoutMs);
   return "";
 }
 
@@ -1652,6 +1653,23 @@ async function synthesizeOpenAIVoiceDataUrl(text, config, timeoutMs = TTS_TIMEOU
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length === 0) return "";
   return `data:audio/mpeg;base64,${bytes.toString("base64")}`;
+}
+
+async function synthesizeElevenLabsVoiceDataUrl(text, config, timeoutMs = TTS_TIMEOUT_MS) {
+  const apiKey = String(config.apiKey || "").trim();
+  const voiceId = String(config.defaultVoice || "").trim();
+  if (!apiKey || !voiceId) return "";
+  const response = await fetchWithTimeout(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
+    method: "POST",
+    headers: { "xi-api-key": apiKey, "Content-Type": "application/json", Accept: "audio/mpeg" },
+    body: JSON.stringify({ text, model_id: String(config.model || "").trim() || "eleven_multilingual_v2" }),
+    redirect: "error",
+  }, timeoutMs);
+  if (!response.ok) return "";
+  const type = response.headers.get("content-type") || "";
+  if (!type.startsWith("audio/") && !type.startsWith("application/octet-stream")) return "";
+  const bytes = Buffer.from(await response.arrayBuffer());
+  return bytes.length ? `data:audio/mpeg;base64,${bytes.toString("base64")}` : "";
 }
 
 async function fetchWithTimeout(url, init, timeoutMs = TTS_TIMEOUT_MS) {

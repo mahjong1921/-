@@ -25,6 +25,7 @@ export function resolveVoiceConfig(characterId: string, appId?: ContentAppId): V
  * Supported providers:
  * - Minimax: REST API → hex-encoded mp3
  * - OpenAI: REST API → binary audio blob
+ * - ElevenLabs: REST API → binary MP3
  */
 export async function synthesizeSpeech(
     text: string,
@@ -41,6 +42,10 @@ export async function synthesizeSpeech(
 
     if (provider === "OpenAI") {
         return synthesizeOpenAI(text, voiceConfig);
+    }
+
+    if (provider === "ElevenLabs") {
+        return synthesizeElevenLabs(text, voiceConfig);
     }
 
     return null;
@@ -172,6 +177,32 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
 
     const blob = await response.blob();
     return new Blob([await blob.arrayBuffer()], { type: "audio/mpeg" });
+}
+
+// ── ElevenLabs TTS ──────────────────────────────────
+
+async function synthesizeElevenLabs(text: string, config: VoiceApiConfig): Promise<Blob> {
+    const apiKey = config.apiKey?.trim();
+    const voiceId = config.defaultVoice?.trim();
+    if (!apiKey) throw new Error("ElevenLabs API Key 未配置");
+    if (!voiceId) throw new Error("ElevenLabs Voice ID 未配置");
+    const response = await fetchWithTimeout(
+        `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`,
+        {
+            method: "POST",
+            headers: { "xi-api-key": apiKey, "Content-Type": "application/json", Accept: "audio/mpeg" },
+            body: JSON.stringify({ text, model_id: config.model?.trim() || "eleven_multilingual_v2" }),
+            redirect: "error",
+        },
+    );
+    if (!response.ok) {
+        throw new Error(`ElevenLabs 语音合成失败 (${response.status})，请检查密钥权限、Voice ID、模型和账户额度`);
+    }
+    const blob = await response.blob();
+    if (!blob.size || (!blob.type.startsWith("audio/") && blob.type !== "application/octet-stream")) {
+        throw new Error("ElevenLabs 未返回有效音频");
+    }
+    return new Blob([blob], { type: "audio/mpeg" });
 }
 
 // ── iOS audio playback that coexists with speech recognition ──────────
