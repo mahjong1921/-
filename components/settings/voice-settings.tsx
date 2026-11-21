@@ -10,7 +10,7 @@ import { ConfirmDialog } from "@/components/ui/modal";
 import { Toggle, Input } from "@/components/ui/form";
 import { Alert } from "@/components/ui/feedback";
 
-const SUPPORTED_VOICE_PROVIDERS = new Set(["Minimax", "OpenAI"]);
+const SUPPORTED_VOICE_PROVIDERS = new Set(["Minimax", "OpenAI", "ElevenLabs"]);
 const MINIMAX_BASE_URL_OPTIONS = [
     { id: "cn", label: "国内版", baseUrl: "https://api.minimaxi.com/v1" },
     { id: "global", label: "海外版", baseUrl: "https://api.minimax.io/v1" },
@@ -28,6 +28,7 @@ const MINIMAX_PITCH_STEP = 1;
 const DEFAULT_SPEECH_PITCH = 0;
 const VOICE_PROVIDER_OPTIONS = [
     { value: "OpenAI", label: "OpenAI TTS" },
+    { value: "ElevenLabs", label: "ElevenLabs" },
     { value: "MinimaxCN", label: "Minimax 语音国内版" },
     { value: "MinimaxGlobal", label: "Minimax 语音海外版" },
 ];
@@ -221,6 +222,7 @@ function makeCloneVoiceId(config: VoiceApiConfig): string {
 }
 
 function providerSelectValue(config: VoiceApiConfig): string {
+    if (config.provider === "ElevenLabs") return "ElevenLabs";
     if (config.provider === "OpenAI") return "OpenAI";
     return config.baseUrl === GLOBAL_MINIMAX_BASE_URL ? "MinimaxGlobal" : "MinimaxCN";
 }
@@ -304,9 +306,24 @@ export function VoiceSettings() {
 
     const updateProvider = (id: string, providerOption: string) => {
         const current = configs.find(c => c.id === id);
+        if (providerOption === "ElevenLabs") {
+            if (current?.provider === "ElevenLabs") return;
+            updateConfig(id, {
+                provider: "ElevenLabs",
+                apiKey: "",
+                baseUrl: "https://api.elevenlabs.io/v1",
+                model: "eleven_multilingual_v2",
+                defaultVoice: "",
+                customVoices: [],
+                enableTTS: true,
+                enableSTT: false,
+            });
+            return;
+        }
         if (providerOption === "OpenAI") {
             updateConfig(id, {
                 provider: "OpenAI",
+                ...(current?.provider === "ElevenLabs" ? { apiKey: "", customVoices: [], enableSTT: true } : {}),
                 baseUrl: "https://api.openai.com/v1",
                 model: "tts-1",
                 defaultVoice: "alloy",
@@ -318,6 +335,7 @@ export function VoiceSettings() {
         const wasMinimax = current?.provider === "Minimax";
         updateConfig(id, {
             provider: "Minimax",
+            ...(current?.provider === "ElevenLabs" ? { apiKey: "", customVoices: [], enableSTT: true } : {}),
             baseUrl: providerOption === "MinimaxGlobal" ? GLOBAL_MINIMAX_BASE_URL : DEFAULT_MINIMAX_BASE_URL,
             model: wasMinimax ? (current?.model || "speech-2.8-turbo") : "speech-2.8-turbo",
             defaultVoice: wasMinimax ? (current?.defaultVoice || "male-qn-qingse") : "male-qn-qingse",
@@ -529,7 +547,9 @@ export function VoiceSettings() {
         setPlayingVoiceId(config.id);
 
         try {
-            const previewText = config.provider === "Minimax" && config.languageBoost
+            const previewText = config.provider === "ElevenLabs"
+                ? "你好，很高兴认识你。这是一段语音试听。"
+                : config.provider === "Minimax" && config.languageBoost
                 ? MINIMAX_PREVIEW_TEXT[config.languageBoost] || "你好，很高兴认识你。这是一段语音试听。"
                 : "你好，我现在是" + (config.defaultVoice || "默认") + "音色。很高兴认识你。";
             const blob = await synthesizeSpeech(
@@ -677,6 +697,18 @@ export function VoiceSettings() {
                                                 placeholder="输入密钥..."
                                             />
                                         </div>
+                                        {config.provider === "ElevenLabs" && (
+                                            <div className="flex flex-col gap-1">
+                                                <label className="menu-desc ml-1">语音模型 (TTS Model)</label>
+                                                <Input
+                                                    type="text"
+                                                    value={config.model || ""}
+                                                    onChange={(e) => updateConfig(config.id, { model: e.target.value })}
+                                                    placeholder="eleven_multilingual_v2"
+                                                />
+                                                <span className="menu-desc ml-1">默认 multilingual v2 支持中文；可手动填写其他 ElevenLabs TTS 模型 ID。</span>
+                                            </div>
+                                        )}
                                         {config.provider === "OpenAI" && (
                                             <>
                                                 <div className="flex flex-col gap-1">
@@ -841,6 +873,24 @@ export function VoiceSettings() {
                                             </>
                                         )}
 
+                                        {config.provider === "ElevenLabs" ? (
+                                            <div className="flex flex-col gap-1">
+                                                <label className="menu-desc ml-1">Voice ID（音色 ID）</label>
+                                                <div className="flex gap-2">
+                                                    <Input
+                                                        type="text"
+                                                        value={config.defaultVoice}
+                                                        onChange={(e) => updateConfig(config.id, { defaultVoice: e.target.value })}
+                                                        placeholder="粘贴 ElevenLabs Voice ID"
+                                                        className="flex-1"
+                                                    />
+                                                    <button type="button" className="ui-icon-btn" aria-label="试听音色" onClick={() => togglePreview(config)}>
+                                                        {playingVoiceId === config.id ? <Pause size={20} /> : <Play size={20} />}
+                                                    </button>
+                                                </div>
+                                                <span className="menu-desc ml-1">在 ElevenLabs 的音色库复制已有音色或克隆音色的 Voice ID。保存后在角色绑定中选择此语音方案。</span>
+                                            </div>
+                                        ) : (
                                         <div className="flex flex-col gap-1">
                                             <label className="menu-desc ml-1">默认音色 (Default Voice) 或 自定义 Voice ID</label>
                                             <div className="flex flex-col gap-2">
@@ -926,6 +976,7 @@ export function VoiceSettings() {
                                             </div>
                                         </div>
 
+                                        )}
                                         <div className="ui-toggle-row">
                                             <span className="menu-label font-medium">启用语音合成 (TTS)</span>
                                             <Toggle checked={config.enableTTS} onChange={(v) => updateConfig(config.id, { enableTTS: v })} />
