@@ -8,21 +8,16 @@ import { generateEmbedding, resolveEmbeddingModel, cosineSimilarity, keywordSear
 import type { MemoryEntry } from "./memory-types";
 
 export const DEFAULT_SEGMENT_PROMPT = `整理本段新增剧情，按时间顺序写成高密度叙事编年史（400–600中文字）。记录行动→反应→结果、明确心理和情感转折的依据、关系变化、关键原话、专有名称、时间地点、约定与未解伏笔。仅在实质性场景或剧情变化时分段。区别事实、明确心理与推测；不杜撰、不续写，不复述露骨细节。只输出摘要纯文本。`;
-export const DEFAULT_STORY_SUMMARY_PROMPT = `你是长期互动剧情的连续性记忆整理助手。你的任务是根据旧记忆和新增剧情更新累计摘要，而不是续写剧情。严格区分已明确发生的事实、角色明确表达的想法和根据言行推测的心理；不杜撰、不美化、不改变人物性格。
-
-请按照以下结构输出，优先保留会影响后续人物选择和关系发展的信息：
-【时间与场景】时间顺序、地点、场景切换、当前时间地点和在场人物。
-【关键事件与因果】重要行动、决定、冲突、结果及其因果联系。
-【人物关系与边界】关系阶段、亲密程度、权力动态、信任变化、承诺和边界。
-【情感节点】情绪转折的触发事件、双方反应、情感意义、未说出口但有明确行为依据的张力。
-【心理状态】各角色当前需求、恐惧、矛盾、期待、防御机制；对推断标注“可能/暗示”，不可当作确定事实。
-【人物动向】当前目标、计划、态度变化、主动或回避的倾向，以及下一步可能影响行动的动机。
-【伏笔与关键细节】秘密、重要物品、未解决问题、约定、具有后续意义的原话和细节。
-【当前剧情衔接点】最后发生的动作、对话与未完成的即时互动。
-
-摘要应具体、准确、结构化，避免空泛评价和重复修辞。保留旧记忆中仍有效的重要信息，并整合新增剧情；如新事实推翻旧状态，以最新明确事实为准。控制在1000–1500中文字，不复述露骨细节，仅输出摘要纯文本。`;
+export const DEFAULT_STORY_SUMMARY_PROMPT = `维护从故事起点至当前的全局剧情档案，不续写。旧阶段与新阶段按长期影响分配篇幅，不因距今较远而省略。整合而非追加；每个事实、事件、心理转折仅记录一次，勿复述独立分段已有的局部动作和细节。区分确认事实、明确心理和有依据的推测。
+【全局剧情脉络】从起点按时间顺序概括阶段、关键事件及因果。
+【人物心理与情感演变】归纳初始状态、转折原因、长期心理轨迹与当前状态，重视情感逻辑。
+【当前关系与状态】关系定位、信任、边界、承诺、目标以及最新明确变化。
+【未解伏笔】尚未解决的秘密、冲突、约定和人物关系；移除已解决项。
+【当前衔接点】最近事件、时间地点与未完成行动，简短记录。
+控制在1000–1500中文字内，删除重复信息，不复述露骨细节，不杜撰；只输出完整更新后的纯文本摘要。`;
 export type SummaryTask = { status: "running" | "paused" | "failed" | "done"; completed: number; total: number; stage: string; startedAt: string; error?: string; targetId: string; targetDigest: string; draft?: {firstId:string; lastId:string; digest:string; parts:string[]; manual?:boolean}; };
 export type RecallHit = { id:string; score:number; mode:"vector"|"keyword" };
+export type RecallRecord = {id:string;sessionId:string;createdAt:string;reason:string;hits:(RecallHit&{content:string;firstId:string;lastId:string})[]};
 
 export type StoryMemoryState = {
   sessionId: string;
@@ -32,6 +27,9 @@ export type StoryMemoryState = {
   segmentPrompt?: string;
   supplementalPrompt?: string;
   supplementalPosition?: "before" | "after";
+  supplementalForSegment?: boolean;
+  supplementalForCore?: boolean;
+  summaryNeedsReroll?: boolean;
   summaryApiConfigId?: string;
   task?: SummaryTask;
   coveredThroughMessageId: string | null;
@@ -50,12 +48,13 @@ export type StoryMemoryState = {
   updatedAt: string;
 };
 export type StoryMemoryRevision = { id: string; sessionId: string; summaryText: string; coveredThroughMessageId: string | null; coveredDigest: string; source: "auto" | "manual" | "restore"; createdAt: string };
-export type StorySegment = { id: string; sessionId: string; firstId: string; lastId: string; digest: string; content: string; createdAt: string; embedding?: number[]; embeddingKey?: string };
+export type StorySegment = { id: string; sessionId: string; firstId: string; lastId: string; digest: string; content: string; createdAt: string; editedAt?:string; editHistory?:{content:string;at:string}[]; embedding?: number[]; embeddingKey?: string };
 class StoryMemoryDB extends Dexie {
   states!: Dexie.Table<StoryMemoryState, string>;
   revisions!: Dexie.Table<StoryMemoryRevision, string>;
   segments!: Dexie.Table<StorySegment, string>;
-  constructor(name:string) { super(name); this.version(1).stores({ states: "sessionId", revisions: "id, sessionId, createdAt" }); this.version(2).stores({ states: "sessionId", revisions: "id, sessionId, createdAt", segments: "id, sessionId" }); }
+  recalls!: Dexie.Table<RecallRecord,string>;
+  constructor(name:string) { super(name); this.version(1).stores({ states: "sessionId", revisions: "id, sessionId, createdAt" }); this.version(2).stores({ states: "sessionId", revisions: "id, sessionId, createdAt", segments: "id, sessionId" }); this.version(3).stores({states:"sessionId",revisions:"id, sessionId, createdAt",segments:"id, sessionId",recalls:"id, sessionId, createdAt"}); }
 }
 const storyDb = new StoryMemoryDB("AiPhoneStoryMemoryDB");
 const vnDb = new StoryMemoryDB("AiPhoneVnMemoryDB");
@@ -80,6 +79,19 @@ export async function hydrateMemoryMirrors() {
 export const requestMemoryPause = (id:string) => { if (activeSummaries.has(id)) pauseRequests.add(id); };
 export const isMemoryRunning = (id:string) => activeSummaries.has(id);
 export const getMemoryRecallHits = (id:string) => recallHits.get(id) ?? [];
+export async function listRecallRecords(id:string) {return (await memoryDb(id).recalls.where("sessionId").equals(id).toArray()).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));}
+export function memoryInstruction(state:StoryMemoryState,kind:"segment"|"core") {
+  const template=kind==="segment"?(state.segmentPrompt?.trim()||DEFAULT_SEGMENT_PROMPT):(state.summaryPrompt?.trim()||DEFAULT_STORY_SUMMARY_PROMPT);
+  const supplement=(kind==="segment"?state.supplementalForSegment!==false:state.supplementalForCore!==false)?state.supplementalPrompt?.trim():"";
+  return supplement?(state.supplementalPosition==="before"?`${supplement}\n\n${template}`:`${template}\n\n${supplement}`):template;
+}
+export function memorySourceText(message:StoryMessage,excludedTags="think,thinking") {
+  // VN inputs retain their original markup and archived-chapter reuse rules.
+  if(message.sessionId.startsWith("vn:"))return message.rawContent;
+  const tags=[...new Set(["think","thinking","summary",...excludedTags.split(",").map(t=>t.trim()).filter(t=>/^[\w:-]+$/.test(t))])];
+  const pattern=new RegExp(`<(${tags.join("|")})(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1\\s*>`,"gi");
+  return message.rawContent.replace(pattern,"").trim();
+}
 export function resolveMemorySummaryApi(state:StoryMemoryState,fallback:ApiConfig):ApiConfig {
   return (state.summaryApiConfigId ? loadApiConfigs().find(c=>c.id===state.summaryApiConfigId) : null) || resolveAuxiliaryApiConfig("memorySummaryApiConfigId") || fallback;
 }
@@ -186,6 +198,7 @@ async function runMemorySummary(sessionId:string,history:StoryMessage[],current:
   const pending = history.slice(oldCovered,cutoff);
   if (!pending.length) { if(resume && oldTask) { await checkpoint({...working,task:{...oldTask,status:"done",stage:"全部完成",draft:undefined}}); return working; } throw new Error("目前没有新的可压缩剧情。"); }
   let rolling = previous.valid ? previous.summary : "";
+  const excludedTags=sessionId.startsWith("vn:")?undefined:await import("./story-storage").then(m=>m.loadStorySessions().find(s=>s.id===sessionId)?.contextExcludedTags).catch(()=>undefined);
   const batches: {texts:string[]; messages:StoryMessage[]; prebuilt?:string}[] = [];
   let chunk = "";
   let chunkMessages: StoryMessage[] = [];
@@ -196,8 +209,7 @@ async function runMemorySummary(sessionId:string,history:StoryMessage[],current:
     if(archived){const end=pending.findIndex((m,i)=>i>=p&&m.id===archived.endId);if(end>=p){flush();batches.push({texts:[],messages:pending.slice(p,end+1),prebuilt:archived.content});p=end;continue;}}
     const chapterIndex=(msg as StoryMessage & {chapterIndex?:number}).chapterIndex;
     if(chunkMessages.length && chapterIndex!==undefined && (chunkMessages[chunkMessages.length-1] as StoryMessage & {chapterIndex?:number}).chapterIndex!==chapterIndex) flush();
-    // Prefer model-produced end-of-chapter summary; preserve user actions verbatim.
-    const body = msg.role==="assistant" && msg.storySummary?.trim() ? msg.storySummary.trim() : msg.rawContent;
+    const body = memorySourceText(msg,excludedTags) || "（无正文）";
     const line = `[${msg.role === "user" ? "用户" : msg.role === "assistant" ? "角色" : "系统"}] ${body}
 `;
     if (chunk && (estimateTokens(chunk+line)>5500 || chunkMessages.length >= 20)) flush();
@@ -210,10 +222,6 @@ async function runMemorySummary(sessionId:string,history:StoryMessage[],current:
   flush();
   task = {status:"running",completed:resume ? oldTask!.completed : 0,total:(resume ? oldTask!.completed : 0)+batches.length,stage:"准备",startedAt:resume ? oldTask!.startedAt : new Date().toISOString(),targetId:history[cutoff-1].id,targetDigest:storyCoveredDigest(history.slice(0,cutoff)),draft:resume ? oldTask!.draft : undefined};
   await checkpoint({...working, task});
-  const instructions = (template:string) => {
-    const supplement=working.supplementalPrompt?.trim();
-    return supplement ? (working.supplementalPosition === "before" ? `${supplement}\n\n${template}` : `${template}\n\n${supplement}`) : template;
-  };
   const stop = async () => { if (!pauseRequests.has(sessionId)) return false; task={...task!,status:"paused",stage:"已暂停"}; await checkpoint({...working,task}); return true; };
   for (let i=0;i<batches.length;i++) {
     const batch = batches[i];
@@ -226,7 +234,7 @@ async function runMemorySummary(sessionId:string,history:StoryMessage[],current:
     for(let j=matchingDraft?.manual ? batch.texts.length : parts.length;j<batch.texts.length;j++) {
       task={...task,stage:`独立摘要 ${label}`,draft:{firstId,lastId,digest,parts:[...parts]}};
       await checkpoint({...working,task});
-      const segmentResult = await simpleLLMCall(apiConfig,[{role:"system",content:instructions(working.segmentPrompt?.trim() || DEFAULT_SEGMENT_PROMPT)},{role:"user",content:`【独立剧情分段】\n${batch.texts[j]}`}],{temperature:0.2,nativeSystemInstruction:true,label:`独立剧情分段 ${label}`});
+      const segmentResult = await simpleLLMCall(apiConfig,[{role:"system",content:memoryInstruction(working,"segment")},{role:"user",content:`【独立剧情分段】\n${batch.texts[j]}`}],{temperature:0.2,nativeSystemInstruction:true,label:`独立剧情分段 ${label}`});
       if (!segmentResult.content?.trim() || segmentResult.wasTruncated) throw fail(task.stage,segmentResult);
       parts.push(segmentResult.content.trim());
       task={...task,draft:{firstId,lastId,digest,parts:[...parts]}};
@@ -235,7 +243,7 @@ async function runMemorySummary(sessionId:string,history:StoryMessage[],current:
     }
     const segment:StorySegment={id,sessionId,firstId,lastId,digest,content:parts.join("\n\n"),createdAt:new Date().toISOString()};
     task={...task,stage:`累计摘要 ${label}`,draft:{firstId,lastId,digest,parts:[...parts],manual:matchingDraft?.manual}}; await checkpoint({...working,task});
-    const result = await simpleLLMCall(apiConfig,[{role:"system",content:instructions(working.summaryPrompt?.trim() || DEFAULT_STORY_SUMMARY_PROMPT)},{role:"user",content:`【旧记忆】\n${rolling || "（无）"}\n【新增分段摘要】\n${segment.content}`}],{temperature:0.2,nativeSystemInstruction:true,label:`剧情记忆压缩 ${label}`});
+    const result = await simpleLLMCall(apiConfig,[{role:"system",content:memoryInstruction(working,"core")},{role:"user",content:`【旧记忆】\n${rolling || "（无）"}\n【新增分段摘要】\n${segment.content}`}],{temperature:0.2,nativeSystemInstruction:true,label:`剧情记忆压缩 ${label}`});
     if (!result.content?.trim() || result.wasTruncated) throw fail(task.stage,result);
     rolling=result.content.trim();
     const covered=history.findIndex(m=>m.id===lastId)+1;
@@ -260,6 +268,83 @@ async function runMemorySummary(sessionId:string,history:StoryMessage[],current:
 function embeddingKey(api: ApiConfig): string { return JSON.stringify([api.id,api.provider,api.baseUrl,resolveEmbeddingModel(api)]); }
 function validVector(vector: number[] | null | undefined): vector is number[] { return !!vector?.length && vector.every(Number.isFinite) && vector.some(v => v !== 0); }
 
+/** Checks complete, non-overlapping coverage. Unlike retrieval, identical content is not a reason to omit a source range. */
+export function orderedRerollSegments(segments:StorySegment[],history:StoryMessage[],state:StoryMemoryState) {
+  if(!resolveStoryMemoryContext(history,{...state,enabled:true}).valid)throw new Error("累计摘要覆盖范围已失效，不能仅重 Roll，请先整理原文。");
+  const end=history.findIndex(m=>m.id===state.coveredThroughMessageId);
+  const ranges=segments.map(s=>({s,a:history.findIndex(m=>m.id===s.firstId),b:history.findIndex(m=>m.id===s.lastId)})).filter(({s,a,b})=>s.sessionId===state.sessionId&&s.content.trim()&&a>=0&&b>=a&&b<=end&&storyCoveredDigest(history.slice(a,b+1))===s.digest);
+  // Prefer a complete path, not a greedily chosen overlap from a previous full rebuild.
+  const paths=new Map<number,typeof ranges>([[end+1,[]]]);
+  for(let a=end;a>=0;a--){const choices=ranges.filter(r=>r.a===a&&paths.has(r.b+1)).sort((x,y)=>y.s.createdAt.localeCompare(x.s.createdAt));if(choices.length){const r=choices[0];paths.set(a,[r,...paths.get(r.b+1)!]);}}
+  if(!paths.has(0))throw new Error("历史分段未完整覆盖累计摘要范围。为防止遗失旧剧情，暂不能仅重 Roll。");
+  return paths.get(0)!.map(r=>r.s);
+}
+const segmentFingerprint=(segments:StorySegment[])=>JSON.stringify(segments.map(s=>[s.id,s.content,s.editedAt]));
+export type RerollPreview={sessionId:string;expectedAt:string;coveredDigest:string;coveredThroughMessageId:string|null;fingerprint:string;summary:string;count:number};
+async function withMemoryLock<T>(id:string,fn:()=>Promise<T>):Promise<T>{
+  if(typeof navigator!=="undefined"&&navigator.locks)return navigator.locks.request(`float-memory:${id}`,{ifAvailable:true},lock=>{if(!lock)throw new Error("其他页面正在整理记忆。");return fn();});
+  return fn();
+}
+export async function previewMemoryReroll(id:string,history:StoryMessage[],current:StoryMemoryState,api:ApiConfig,onProgress?:(label:string)=>void):Promise<RerollPreview>{
+  return withMemoryLock(id,async()=>{
+    if(isMemoryRunning(id)||current.sessionId!==id)throw new Error("记忆任务正在运行或会话不一致。");
+    activeSummaries.add(id);
+    try {
+      const stored=await loadStoryMemory(id);
+      if(stored.updatedAt!==current.updatedAt)throw new Error("设置已变化，请重新打开管理页。");
+      const segments=orderedRerollSegments(await listStorySegments(id),history,stored);
+      api=resolveMemorySummaryApi(current,api);
+      let items=segments.map((s,i)=>`【分段 ${i+1}】\n${s.content}`);
+      const prompt=memoryInstruction(current,"core");
+      for(let level=0;level<8;level++){
+        const groups:string[][]=[];let group:string[]=[];let size=0;
+        for(const item of items){const n=estimateTokens(item);if(n>12000)throw new Error("存在过长的手动分段，请先压缩该段再重 Roll。");if(group.length&&size+n>12000){groups.push(group);group=[];size=0;}group.push(item);size+=n;}if(group.length)groups.push(group);
+        const results:string[]=[];
+        for(let i=0;i<groups.length;i++){
+          onProgress?.(`第 ${level+1} 层 · ${i+1}/${groups.length}`);
+          const result=await simpleLLMCall(api,[{role:"system",content:prompt},{role:"user",content:`【从历史分段重建${groups.length===1?"全局":"局部阶段"}累计摘要】\n严格按给定时间顺序整合，不复述重复信息，不遗漏较早阶段。${groups.length>1?"这是连续的局部范围，保留该范围关键转折供后续全局整合。":""}\n${groups[i].join("\n\n")}`}],{temperature:0.2,nativeSystemInstruction:true,label:"累计摘要重 Roll"});
+          if(!result.content?.trim()||result.wasTruncated)throw new Error(`重 Roll ${i+1}/${groups.length} 失败：${(result.error||result.finishReason||"输出为空或截断").slice(0,400)}`);
+          results.push(result.content.trim());
+        }
+        if(groups.length===1)return {sessionId:id,expectedAt:stored.updatedAt,coveredDigest:stored.coveredDigest,coveredThroughMessageId:stored.coveredThroughMessageId,fingerprint:segmentFingerprint(segments),summary:results[0],count:segments.length};
+        items=results.map((s,i)=>`【连续阶段 ${i+1}】\n${s}`);
+      }
+      throw new Error("历史摘要过长，无法在有限层数内重建，旧摘要未改变。");
+    }finally{activeSummaries.delete(id);}
+  });
+}
+export async function commitMemoryReroll(preview:RerollPreview,history:StoryMessage[],summary=preview.summary){
+  const id=preview.sessionId;
+  return withMemoryLock(id,async()=>{
+    if(isMemoryRunning(id))throw new Error("已有记忆任务运行中。");
+    const state=await loadStoryMemory(id);
+    if(!summary.trim()||state.updatedAt!==preview.expectedAt||state.coveredDigest!==preview.coveredDigest||state.coveredThroughMessageId!==preview.coveredThroughMessageId||segmentFingerprint(orderedRerollSegments(await listStorySegments(id),history,state))!==preview.fingerprint)throw new Error("预览后记忆或原文已变化，请重新生成预览。");
+    return saveStoryMemory({...state,summaryText:summary.trim(),summaryNeedsReroll:false},"manual",[],state);
+  });
+}
+export async function editMemorySegment(id:string,segmentId:string,history:StoryMessage[],content:string,expectedContent:string){
+  return withMemoryLock(id,async()=>{
+    if(isMemoryRunning(id)||!content.trim())throw new Error("整理任务运行中或摘要为空。");
+    const state=await loadStoryMemory(id),db=memoryDb(id);
+    const segment=await db.segments.get(segmentId);
+    const a=history.findIndex(m=>m.id===segment?.firstId),b=history.findIndex(m=>m.id===segment?.lastId);
+    if(!segment||segment.sessionId!==id||segment.content!==expectedContent||history.some(m=>m.sessionId!==id)||a<0||b<a||storyCoveredDigest(history.slice(a,b+1))!==segment.digest)throw new Error("分段已变化或原文范围失效。");
+    if(segment.content===content.trim())return state;
+    const at=new Date().toISOString();
+    return saveStoryMemory({...state,summaryNeedsReroll:true},"manual",[{...segment,content:content.trim(),editedAt:at,editHistory:[...(segment.editHistory??[]),{content:segment.content,at}],embedding:undefined,embeddingKey:undefined}],state,true);
+  });
+}
+export async function reindexMemorySegment(id:string,segmentId:string){
+  return withMemoryLock(id,async()=>{
+    if(isMemoryRunning(id))throw new Error("已有记忆任务运行中。");
+    const db=memoryDb(id),s=await db.segments.get(segmentId),api=resolveAuxiliaryApiConfig("embeddingApiConfigId");
+    if(!s||s.sessionId!==id||!api||!resolveEmbeddingModel(api))throw new Error("分段不存在或未配置 Embedding API。");
+    const embedding=await generateEmbedding(s.content,api);
+    if(!validVector(embedding))throw new Error("向量索引生成失败。");
+    await db.transaction("rw",db.segments,async()=>{const now=await db.segments.get(s.id);if(!now||now.content!==s.content||now.editedAt!==s.editedAt)throw new Error("分段已更新，请重试。");await db.segments.put({...now,embedding,embeddingKey:embeddingKey(api)});});
+  });
+}
+
 /** Only segments fully covered by the CURRENT valid summary may be recalled. */
 export function filterStorySegments(segments: StorySegment[], history: StoryMessage[], state: StoryMemoryState): StorySegment[] {
   if (!resolveStoryMemoryContext(history,state).valid || history.some(m => m.sessionId !== state.sessionId)) return [];
@@ -280,14 +365,25 @@ export function filterStorySegments(segments: StorySegment[], history: StoryMess
 
 export async function recallStorySegments(history: StoryMessage[], state: StoryMemoryState, allowEmbedding = true): Promise<StorySegment[]> {
   const db=memoryDb(state.sessionId);
+  const finish=async(result:StorySegment[],reason:string,hits:RecallHit[]=[]):Promise<StorySegment[]>=>{
+    if(allowEmbedding&&state.sessionId){
+      recallHits.set(state.sessionId,hits);
+      try{
+        const record:RecallRecord={id:`${Date.now()}_${Math.random().toString(36).slice(2)}`,sessionId:state.sessionId,createdAt:new Date().toISOString(),reason,hits:hits.flatMap(h=>{const s=result.find(x=>x.id===h.id);return s?[{...h,content:s.content,firstId:s.firstId,lastId:s.lastId}]:[];})};
+        await db.transaction("rw",db.recalls,async()=>{await db.recalls.put(record);const prior=(await db.recalls.where("sessionId").equals(state.sessionId).toArray()).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id));await db.recalls.bulkDelete(prior.slice(20).map(r=>r.id));});
+      }catch{/* logging must not alter retrieval */}
+    }
+    return result;
+  };
+  try {
   if(allowEmbedding) recallHits.set(state.sessionId,[]);
-  if (state.recallEnabled === false || !state.sessionId) return [];
+  if (state.recallEnabled === false || !state.sessionId) return finish([],"召回关闭或无会话");
   const resolved = resolveStoryMemoryContext(history,state);
-  if (!resolved.valid) return [];
+  if (!resolved.valid) return finish([],"无有效累计摘要");
   const segments = filterStorySegments(await db.segments.where("sessionId").equals(state.sessionId).toArray(),history,state);
-  if (!segments.length) return [];
+  if (!segments.length) return finish([],"无有效历史分段");
   const query = resolved.history.slice(-12).map(m => m.rawContent.replace(/<(think|thinking)>[\s\S]*?<\/\1>/gi, "")).join("\n").slice(-12000);
-  if (!query.trim()) return [];
+  if (!query.trim()) return finish([],"当前剧情为空");
   const topK = Math.max(3,Math.min(5,Math.floor(state.recallTopK || 4)));
   const api = allowEmbedding ? resolveAuxiliaryApiConfig("embeddingApiConfigId") : null;
   if (api && resolveEmbeddingModel(api)) {
@@ -297,17 +393,17 @@ export async function recallStorySegments(history: StoryMessage[], state: StoryM
       // Lazily index old/unindexed segments, limiting additional requests per generation.
       for (const s of segments.filter(s => s.embeddingKey !== key || !validVector(s.embedding)).slice(0,5)) {
         const e = await generateEmbedding(s.content,api);
-        if (validVector(e)) { s.embedding=e; s.embeddingKey=key; await db.segments.put(s); }
+        if (validVector(e)) { s.embedding=e; s.embeddingKey=key; await db.transaction("rw",db.segments,async()=>{const latest=await db.segments.get(s.id);if(latest?.content===s.content&&latest?.editedAt===s.editedAt)await db.segments.put({...latest,embedding:e,embeddingKey:key});}); }
       }
       const ranked = segments.filter(s => s.embeddingKey === key && validVector(s.embedding) && s.embedding.length === vector.length)
         .map(s => ({s,score:cosineSimilarity(vector,s.embedding!)})).filter(s => s.score > 0).sort((a,b)=>b.score-a.score);
-      if (ranked.length) { const selected=ranked.slice(0,topK); if(allowEmbedding) recallHits.set(state.sessionId,selected.map(r=>({id:r.s.id,score:r.score,mode:"vector"}))); return selected.map(r=>r.s); }
+      if (ranked.length) { const selected=ranked.slice(0,topK);return finish(selected.map(r=>r.s),"向量召回",selected.map(r=>({id:r.s.id,score:r.score,mode:"vector"}))); }
     }
   }
   const entries: MemoryEntry[] = segments.map(s => ({id:s.id,characterId:state.sessionId,sourceApp:"story",type:"long_term",content:s.content,importance:1,createdAt:s.createdAt,updatedAt:s.createdAt}));
   const hits = keywordSearch(query,entries,topK);
-  if(allowEmbedding) recallHits.set(state.sessionId,hits.map(h=>({id:h.entry.id,score:h.score,mode:"keyword"})));
-  return hits.map(h => segments.find(s => s.id === h.entry.id)!);
+  return finish(hits.map(h => segments.find(s => s.id === h.entry.id)!),hits.length?"关键词召回":"未命中",hits.map(h=>({id:h.entry.id,score:h.score,mode:"keyword"})));
+  }catch(error){await finish([],"检索异常（本次未取得结果）");throw error;}
 }
 
 /** Read-only sync projection used by the native timeline. Never use this as the
