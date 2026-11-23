@@ -46,6 +46,7 @@ import { CustomAppForegroundBoundary } from "@/components/app-market/custom-app-
 import { hydrateKvDb, kvGet, kvSet, kvRemove, kvKeysWithPrefix } from "@/lib/kv-db";
 import { deleteDatabase } from "@/lib/data-management/idb";
 import { hydrateStoryStorage } from "@/lib/story-storage";
+import { hydrateMemoryMirrors } from "@/lib/story-memory-manager";
 import { hydrateMomentsStorage } from "@/lib/moments-storage";
 import { hydrateVnStorage } from "@/lib/vn-storage";
 import { hydrateSettingsDb } from "@/lib/settings-db";
@@ -1778,6 +1779,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
           hydrateStoryStorage(),
           hydrateMomentsStorage(),
           hydrateVnStorage(),
+          hydrateMemoryMirrors(),
           hydrateDwellingStorage(),
           hydrateCheckPhoneStorage(),
         ]);

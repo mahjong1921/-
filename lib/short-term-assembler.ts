@@ -15,6 +15,7 @@ import { loadStoryProjectionEntries, loadStorySessions, loadStoryMessages } from
 import { readStoryMemoryMirror, resolveStoryMemoryContext, extractTaggedStorySummary } from "./story-memory-manager";
 import { buildTwoLevelMomentThreads } from "./moments-comment-threading";
 import { loadVnProjectionEntries } from "./vn-storage";
+import { readVnCrossSceneMemory } from "./vn-memory-manager";
 import { loadMapProjectionEntries, loadMapSharedProjectionEntries } from "./map-storage";
 import { loadGameProjectionEntries } from "./game-storage";
 import { loadDiaryEntries } from "./diary-entry-storage";
@@ -596,10 +597,12 @@ export function loadNativeTimeline(
     }
 
     // ── VN projections ──
+    const vnMemory = readVnCrossSceneMemory(characterId);
     const vnEntries = loadVnProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     });
-    for (const vnEntry of vnEntries) {
+    for (const vnEntry of (options?.appId === "vn" || (options?.excludeDedicatedStory && vnMemory) ? [] : vnMemory ?? vnEntries)) {
+        if(options?.afterTimestamp && vnEntry.timestamp<=options.afterTimestamp)continue;
         entries.push({
             id: vnEntry.id,
             sourceApp: "vn",

@@ -21,6 +21,9 @@ import {
 } from "@/lib/vn-storage";
 import type { VnFrameAudio, VnMessage } from "@/lib/vn-types";
 import { generateVnCompletion } from "@/lib/vn-engine";
+import { VnMemorySettings } from "./vn-memory-settings";
+import { isMemoryRunning,loadStoryMemory } from "@/lib/story-memory-manager";
+import { vnMemoryId } from "@/lib/vn-memory-manager";
 import { parseVnResponse, packageUserInput, packageMultiActions } from "@/lib/vn-parser";
 import { resolveVnAssetMap, loadVnScenes, getVnSceneLayout, getVnSpriteLayout } from "@/lib/vn-asset-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
@@ -95,6 +98,9 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
   const [inputMode, setInputMode] = useState<"dialogue" | "narration">("dialogue");
   const [pendingActions, setPendingActions] = useState<{ type: "dialogue" | "narration" | "scene_switch"; text: string }[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [memoryOpen,setMemoryOpen]=useState(false);
+  const [memoryRunning,setMemoryRunning]=useState(false);
+  const [memoryFailed,setMemoryFailed]=useState(false);
   const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
   const [isArchiving, setIsArchiving] = useState(false);
   const [showScenePicker, setShowScenePicker] = useState(false);
@@ -136,6 +142,7 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
   const defaultTranslationExpanded = collapseBilingualTranslation ? false : true;
 
   const session = createOrGetVnSession(characterId);
+  useEffect(()=>{let alive=true,previous:boolean|undefined;const tick=()=>{const id=vnMemoryId(session.id),running=isMemoryRunning(id);setMemoryRunning(running);if(previous!==running)void loadStoryMemory(id).then(s=>{if(alive)setMemoryFailed(s.task?.status==="failed"||s.task?.status==="paused");}).catch(()=>{});previous=running;};tick();const timer=setInterval(tick,500);return()=>{alive=false;clearInterval(timer);};},[session.id]);
   const isArchived = session.chapters[chapterIndex]?.archived ?? false;
 
   const userName = useMemo(() => resolveUserIdentity(characterId, "vn")?.name ?? "我", [characterId]);
@@ -913,7 +920,7 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
 
   return (
     <div className="vn-shell" ref={vnShellRef} data-vn-theme={vnTheme || "default"} onClick={() => {
-      if (historyOpen || showArchiveConfirm || showReplayConfirm || showScenePicker || showBeatsPanel) return;
+      if (historyOpen || showArchiveConfirm || showReplayConfirm || showScenePicker || showBeatsPanel || memoryOpen) return;
       if (isReplaying) { advanceReplay(); return; }
       if (waitingForInput && !isArchived) { setWaitingForInput(false); return; }
       if (!hideDialogue) advance();
@@ -971,6 +978,7 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
           <ArrowLeft size={20} />
         </button>
         <div className="vn-topbar-right">
+          <button className="vn-topbar-btn" onClick={()=>setMemoryOpen(true)} title="溯章漫卷记忆">{memoryRunning?"整理中…":memoryFailed?"溯章 · 待续":"溯章"}</button>
           {!isArchived && (
             <button className="vn-topbar-btn" onClick={() => setShowBeatsPanel(true)} title="情节控制">
               <ListOrdered size={18} />
@@ -1381,6 +1389,7 @@ export function VnPlayer({ characterId, chapterIndex, onClose, onChapterEnd, vnT
           </div>
         </div>
       )}
+      {memoryOpen&&<div onClick={e=>e.stopPropagation()}><VnMemorySettings sessionId={session.id} characterId={characterId} onClose={()=>setMemoryOpen(false)}/></div>}
     </div>
   );
 }

@@ -91,7 +91,7 @@ export function isNativeGoogleApi(config: ApiConfig): boolean {
 }
 
 export type SimpleLLMMessage = { role: string; content: string };
-export type SimpleLLMCallOptions = { temperature?: number; max_tokens?: number; signal?: AbortSignal; label?: string };
+export type SimpleLLMCallOptions = { temperature?: number; max_tokens?: number; signal?: AbortSignal; label?: string; nativeSystemInstruction?: boolean };
 export type SimpleLLMCallResult = { content: string | null; error?: string; finishReason?: string; wasTruncated?: boolean };
 export type SimpleLLMRequest = {
     url: string;
@@ -143,7 +143,8 @@ export function buildSimpleLLMRequest(
         // Google Gemini API
         // Remove Authorization header for Gemini (uses URL key)
         delete headers["Authorization"];
-        const parts = messages.map(m => ({
+        const systemTexts = options?.nativeSystemInstruction ? messages.filter(m=>m.role==="system").map(m=>m.content) : [];
+        const parts = (systemTexts.length ? messages.filter(m=>m.role!=="system") : messages).map(m => ({
             role: m.role === "assistant" ? "model" : "user",
             parts: [{ text: m.content }],
         }));
@@ -153,6 +154,7 @@ export function buildSimpleLLMRequest(
             headers,
             body: JSON.stringify({
                 contents: parts,
+                ...(systemTexts.length ? { systemInstruction:{parts:systemTexts.map(text=>({text}))} } : {}),
                 generationConfig: {
                     temperature,
                     ...(max_tokens ? { maxOutputTokens: max_tokens } : {}),

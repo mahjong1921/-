@@ -10,6 +10,7 @@ import {
   loadVnMessagesForChapter,
 } from "@/lib/vn-storage";
 import { summarizeVnChapter } from "@/lib/vn-engine";
+import { VnMemorySettings } from "./vn-memory-settings";
 
 interface VnChaptersProps {
   characterId: string;
@@ -29,6 +30,7 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
   const [mounted, setMounted] = useState(false);
   const [, forceUpdate] = useState(0);
   const [summarizing, setSummarizing] = useState<number | null>(null);
+  const [memoryOpen,setMemoryOpen]=useState(false);
 
   const character = useMemo(() => {
     return loadCharacters().find((c) => c.id === characterId);
@@ -359,7 +361,7 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
           <div className="vnc-char-name">{character?.name ?? "角色"}</div>
           <div className="vnc-char-sub">Story Line</div>
         </div>
-        <div style={{ width: 40 }} />
+        <button onClick={()=>setMemoryOpen(true)} style={{background:"transparent",color:"inherit",padding:8}}>溯章</button>
       </div>
 
       {/* ── Scrollable Star Map ── */}
@@ -432,6 +434,7 @@ export function VnChapters({ characterId, onClose, onSelect, vnTheme }: VnChapte
         </div>
       </div>
 
+      {memoryOpen&&<VnMemorySettings sessionId={session.id} characterId={characterId} onClose={()=>setMemoryOpen(false)}/>}
     </div>
   );
 }
