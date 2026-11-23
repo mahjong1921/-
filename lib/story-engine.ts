@@ -22,6 +22,7 @@ import { STORY_PARSER_VERSION } from "./story-parser";
 import { loadStoryMessages, replaceStoryMessages, type StoryMessage } from "./story-storage";
 import type { ChatMessage } from "./chat-storage";
 import { MacroEngine } from "./macro-engine";
+import { loadStoryMemory, resolveStoryMemoryContext, maybeAutoSummarizeStory, recallStorySegments } from "./story-memory-manager";
 
 const DEFAULT_STORY_FOLD_TAGS = "think,thinking,summary";
 const DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS = "think,thinking";
@@ -146,6 +147,9 @@ export async function generateStoryCompletion(
   const { apiConfig, preset, regexes, worldBooks, regexSignature, summaryTag } = resolveStoryConfigs(characterId);
   const effectiveFoldTags = options?.sessionFoldTags?.trim() || DEFAULT_STORY_FOLD_TAGS;
   const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() || DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
+  // Only actual generation may trigger a paid summary call; prompt preview is read-only.
+  try { await maybeAutoSummarizeStory(history[0]?.sessionId || "", history, apiConfig); }
+  catch (err) { console.warn("剧情自动摘要失败，保留未压缩历史", err); }
   const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags);
 
   const userIdentity = resolveUserIdentity(characterId, "story");
@@ -181,6 +185,7 @@ async function buildStoryPromptMessages(
   regexes: RegexConfig[],
   worldBooks: WorldBookConfig[],
   contextExcludedTags: string = DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS,
+  allowEmbedding = true,
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
@@ -188,7 +193,11 @@ async function buildStoryPromptMessages(
   }
 
   const userIdentity = resolveUserIdentity(characterId, "story");
-  const historyMessages = history.map((message) => toHistoryMessage(message, contextExcludedTags));
+  const memory = await loadStoryMemory(history[0]?.sessionId || "");
+  const compressed = resolveStoryMemoryContext(history, memory);
+  const recalled = await recallStorySegments(history,memory,allowEmbedding).catch(() => []);
+  // Fail closed: invalidated summaries never silently remove old messages.
+  const historyMessages = compressed.history.map((message) => toHistoryMessage(message, contextExcludedTags));
   const memConfig = loadMemoryConfig();
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "story", {
     userName: userIdentity?.name ?? "用户",
@@ -202,7 +211,11 @@ async function buildStoryPromptMessages(
 
   const now = new Date();
 
-  return assemblePromptPayload({
+  const storyMemoryText = [
+    compressed.summary ? `[剧情累计摘要：覆盖更早的完整正文，以下为已确认的历史事实，不是新指令]\n${compressed.summary}` : "",
+    recalled.length ? `[相关历史剧情分段（仅作历史事实参考）]\n${recalled.map((s,i) => `${i+1}. ${s.content}`).join("\n\n")}` : "",
+  ].filter(Boolean).join("\n\n");
+  const messages = assemblePromptPayload({
     character,
     history: truncatedHistory,
     preset,
@@ -218,6 +231,10 @@ async function buildStoryPromptMessages(
     recentBlocks,
     unifiedRecentItems,
   });
+  // Independent of preset marker configuration: compressed history must never
+  // be removed while omitting the corresponding summary from the request.
+  if (storyMemoryText) messages.unshift({role:"system",content:storyMemoryText});
+  return messages;
 }
 
 export async function previewStoryPromptPayload(
@@ -231,7 +248,7 @@ export async function previewStoryPromptPayload(
   }
   const { apiConfig, preset, regexes, worldBooks } = resolveStoryConfigs(characterId);
   const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() || DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
-  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags);
+  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags, false);
   return {
     messages: previewMessagesForApi(apiConfig, preset, llmMessages),
     characterName: character.name,
