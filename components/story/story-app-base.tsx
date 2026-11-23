@@ -64,8 +64,8 @@ import { SessionCustomCSS } from "@/components/ui/session-custom-css";
 import { STORY_CSS_EXAMPLE } from "@/lib/css-examples";
 import { applyEditOutputRegex } from "@/lib/llm-prompt-assembler";
 import { MacroEngine } from "@/lib/macro-engine";
-import { loadStoryMemory, saveStoryMemory, generateStoryMemorySummary, listStoryMemoryRevisions, resolveStoryMemoryContext, defaultStoryMemoryState, DEFAULT_STORY_SUMMARY_PROMPT, DEFAULT_SEGMENT_PROMPT, isMemoryRunning, resolveMemorySummaryApi, type StoryMemoryState, type StoryMemoryRevision } from "@/lib/story-memory-manager";
-import { MemoryTaskPanel } from "./memory-task-panel";
+import { loadStoryMemory, isMemoryRunning, type StoryMemoryState } from "@/lib/story-memory-manager";
+import { MemoryWorkspace } from "./memory-workspace";
 import { loadApiConfigs, loadBindingConfig, resolveBinding, resolveAuxiliaryApiConfig } from "@/lib/settings-storage";
 
 type StoryAppProps = {
@@ -299,8 +299,6 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [cssModalOpen, setCssModalOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryState, setMemoryState] = useState<StoryMemoryState | null>(null);
-  const [memoryRevisions, setMemoryRevisions] = useState<StoryMemoryRevision[]>([]);
-  const [memoryBusy, setMemoryBusy] = useState(false);
   const [memoryRunning,setMemoryRunning]=useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const shellInnerRef = useRef<HTMLDivElement | null>(null);
@@ -384,36 +382,12 @@ export function StoryApp({ onClose }: StoryAppProps) {
   useEffect(() => {
     if (!activeSessionId) return;
     let active = true;
-    Promise.all([loadStoryMemory(activeSessionId), listStoryMemoryRevisions(activeSessionId)]).then(([state, revisions]) => {
-      if (active) { setMemoryState(state); setMemoryRevisions(revisions); }
+    loadStoryMemory(activeSessionId).then(state => {
+      if (active) setMemoryState(state);
     }).catch(console.error);
     return () => { active = false; };
   }, [activeSessionId, memoryOpen]);
   useEffect(()=>{if(!activeSessionId)return;let wasRunning=false;let alive=true;const tick=()=>{const running=isMemoryRunning(activeSessionId);setMemoryRunning(running);if(wasRunning&&!running)void loadStoryMemory(activeSessionId).then(s=>{if(alive)setMemoryState(s);});wasRunning=running;};tick();const t=setInterval(tick,500);return()=>{alive=false;clearInterval(t);};},[activeSessionId]);
-
-  const persistMemory = async (next: StoryMemoryState) => {
-    try {
-      await saveStoryMemory(next, "manual", [], next);
-      setMemoryState(await loadStoryMemory(next.sessionId));
-      setMemoryRevisions(await listStoryMemoryRevisions(next.sessionId));
-    } catch(e) { alert(e instanceof Error ? e.message : "保存失败"); }
-  };
-  const regenerateMemory = async (rebuild = false) => {
-    if (!memoryState || !activeCharacterId) return;
-    const bound = resolveBinding(loadBindingConfig(), activeCharacterId, "story");
-    const fallback = resolveAuxiliaryApiConfig("memorySummaryApiConfigId") || loadApiConfigs().find(c => c.id === bound.apiConfigId) || loadApiConfigs().find(c=>c.id===memoryState.summaryApiConfigId);
-    const config = fallback ? resolveMemorySummaryApi(memoryState,fallback) : undefined;
-    if (!config) { alert("请先绑定剧情 API 或辅助记忆总结 API"); return; }
-    if (!confirm(`将调用 ${config.defaultModel} ${rebuild ? "从原文重建全部可压缩的剧情摘要和索引" : "对旧剧情进行分段摘要"}，可能产生多次 API 费用。继续？`)) return;
-    setMemoryBusy(true);
-    try {
-      const next = await generateStoryMemorySummary(activeSessionId, loadStoryMessages(activeSessionId), rebuild ? {...memoryState,summaryText:"",coveredThroughMessageId:null,coveredDigest:"",task:undefined} : memoryState, config);
-      setMemoryState(next);
-      setMemoryRevisions(await listStoryMemoryRevisions(activeSessionId));
-      alert(next.task?.status==="paused"?"已暂停，成功分段已保存。":"剧情摘要生成完成。请在提示词查看器中检查实际请求内容。");
-    } catch(e) { setMemoryState(await loadStoryMemory(activeSessionId)); alert(e instanceof Error ? e.message : "摘要生成失败"); }
-    finally { setMemoryBusy(false); }
-  };
 
   // Listen for live CSS updates from 小卷
   useEffect(() => {
@@ -1262,58 +1236,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
 
       {/* CSS Style Modal */}
       {!memoryOpen&&(memoryRunning||memoryState?.task?.status==="failed"||memoryState?.task?.status==="paused")&&<button onClick={()=>setMemoryOpen(true)} style={{position:"fixed",top:64,right:14,zIndex:500,background:"#dce6ff",color:"#334",padding:8,borderRadius:10}}>{memoryRunning?"溯章正在整理记忆 · 查看进度":memoryState?.task?.status==="failed"?"溯章摘要失败 · 查看 / 续作":"溯章已暂停 · 继续任务"}</button>}
-      {memoryOpen && memoryState && memoryState.sessionId===activeSessionId && (
-        <div style={{position:"fixed",inset:0,zIndex:9999,background:"rgba(0,0,0,.65)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-          <div style={{background:"#fffdf9",color:"#39352f",borderRadius:14,padding:18,width:"100%",maxWidth:600,maxHeight:"88vh",overflowY:"auto",display:"grid",gap:12}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><strong>剧情记忆管理</strong><button onClick={()=>setMemoryOpen(false)}>关闭 ✕</button></div>
-            <MemoryTaskPanel sessionId={activeSessionId} onChanged={()=>void loadStoryMemory(activeSessionId).then(setMemoryState)}/>
-            <label>摘要模型绑定 <select disabled={memoryBusy||memoryRunning} value={memoryState.summaryApiConfigId??""} onChange={e=>setMemoryState({...memoryState,summaryApiConfigId:e.target.value||undefined})}><option value="">辅助记忆总结 API（未设置则剧情 API）</option>{loadApiConfigs().map(c=><option key={c.id} value={c.id}>{c.name||c.defaultModel} · {c.defaultModel}</option>)}</select></label>
-            <label><input type="checkbox" checked={memoryState.enabled} onChange={e=>setMemoryState({...memoryState,enabled:e.target.checked})}/> 启用摘要压缩（保存后生效）</label>
-            <label>保留最近完整对话轮数 <input type="number" min={2} max={30} value={memoryState.recentTurns} onChange={e=>setMemoryState({...memoryState,recentTurns:Math.max(2,Math.min(30,Number(e.target.value)||6))})} style={{width:70,marginLeft:8}} /></label>
-            <label>自动摘要 Token 阈值 <input type="number" min={2000} step={1000} value={memoryState.triggerTokens} onChange={e=>setMemoryState({...memoryState,triggerTokens:Number(e.target.value)||20000})} style={{width:100,marginLeft:8}} /> tokens</label>
-            <label>自动摘要触发模式 <select value={memoryState.triggerMode ?? "hybrid"} onChange={e=>setMemoryState({...memoryState,triggerMode:e.target.value as StoryMemoryState["triggerMode"]})} style={{marginLeft:8}}><option value="hybrid">混合：条数或 Token 达标</option><option value="count">仅按消息条数</option><option value="tokens">仅按 Token</option><option value="manual">仅手动生成</option></select></label>
-            <label>自动摘要消息阈值 <input type="number" min={2} max={500} value={memoryState.triggerMessages ?? 20} onChange={e=>setMemoryState({...memoryState,triggerMessages:Math.max(2,Number(e.target.value)||20)})} style={{width:80,marginLeft:8}} /> 条</label>
-            <small>自动与手动总结使用同一摘要 API 绑定，产生额外费用；每段成功保存后才裁剪对应旧正文。调整参数后请点击保存。</small>
-            <label><input type="checkbox" checked={memoryState.recallEnabled !== false} onChange={e=>setMemoryState({...memoryState,recallEnabled:e.target.checked})}/> 启用相关历史剧情检索（使用绑定的 Embedding API，未配置则关键词检索）</label>
-            <label>召回历史分段数 <select value={memoryState.recallTopK ?? 4} onChange={e=>setMemoryState({...memoryState,recallTopK:Number(e.target.value)})}><option value={3}>3</option><option value={4}>4</option><option value={5}>5</option></select></label>
-            <small>正式生成时使用向量检索；预览仅进行关键词检索，不额外调用剧情 Embedding API。</small>
-            <details style={{border:"1px solid #ddd5c9",borderRadius:10,padding:12}}>
-              <summary style={{cursor:"pointer",fontWeight:600}}>跨场景记忆设置</summary>
-              <label style={{display:"block",marginTop:8}}>线上 → 线下 <select value={memoryState.crossChatToStory ?? "full"} onChange={e=>setMemoryState({...memoryState,crossChatToStory:e.target.value as StoryMemoryState["crossChatToStory"]})}><option value="full">完整线上聊天</option><option value="summary-recent">摘要 + 近期聊天（预留）</option></select></label>
-              <label style={{display:"block",marginTop:8}}>线下 → 线上 <select value={memoryState.crossStoryToChat ?? "summary-recent"} onChange={e=>setMemoryState({...memoryState,crossStoryToChat:e.target.value as StoryMemoryState["crossStoryToChat"]})}><option value="summary-recent">累计摘要 + 近期文末摘要</option><option value="summary">仅累计摘要</option><option value="full">原有事件投影</option></select></label>
-              <label style={{display:"block",marginTop:8}}>朋友圈 → 其他场景 <select value={memoryState.crossMoments ?? "summary-recent"} onChange={e=>setMemoryState({...memoryState,crossMoments:e.target.value as StoryMemoryState["crossMoments"]})}><option value="summary-recent">简短历史 + 最近动态</option><option value="recent">仅最近动态</option><option value="full">原有全部动态</option></select></label>
-            </details>
-            <details style={{border:"1px solid #ddd5c9",borderRadius:10,padding:12}}>
-              <summary style={{cursor:"pointer",fontWeight:600}}>「在场」轻量记忆</summary>
-              <label style={{display:"block",marginTop:8}}><input type="checkbox" checked={memoryState.interviewEnabled !== false} onChange={e=>setMemoryState({...memoryState,interviewEnabled:e.target.checked})}/> 启用累计摘要 + 最近文末 &lt;summary&gt;</label>
-              <label style={{display:"block",marginTop:8}}>最近文末摘要 <input type="number" min={1} max={20} value={memoryState.interviewSummaryTurns ?? 6} onChange={e=>setMemoryState({...memoryState,interviewSummaryTurns:Math.max(1,Math.min(20,Number(e.target.value)||6))})} style={{width:70,marginLeft:8}} /> 轮</label>
-              <small>只读取剧情原文中的 &lt;summary&gt; 标签，不读取完整剧情正文。</small>
-            </details>
-            <details style={{border:"1px solid #ddd5c9",borderRadius:10,padding:12}}>
-              <summary style={{cursor:"pointer",fontWeight:600}}>累计摘要提示词（点击展开，可编辑）</summary>
-              <p style={{fontSize:12,color:"#6b6258"}}>每条剧情线独立保存。生成 / 更新摘要时会使用这里的规则；修改后请先保存设置。旧版本未设置时自动使用默认模板。</p>
-              <textarea aria-label="摘要提示词" rows={14} value={memoryState.summaryPrompt ?? DEFAULT_STORY_SUMMARY_PROMPT} onChange={e=>setMemoryState({...memoryState,summaryPrompt:e.target.value})} style={{width:"100%",boxSizing:"border-box",padding:8,border:"1px solid #bcb5aa",borderRadius:8,color:"#333",background:"white",fontFamily:"inherit",lineHeight:1.6}} />
-              <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:8}}>
-                <button type="button" onClick={()=>{if(confirm("恢复默认摘要提示词？尚未保存的修改将被替换。"))setMemoryState({...memoryState,summaryPrompt:DEFAULT_STORY_SUMMARY_PROMPT});}} style={{padding:8,border:"1px solid #ccc",borderRadius:7}}>恢复默认模板</button>
-                <button type="button" onClick={()=>window.alert(`${memoryState.supplementalPosition==="before"?memoryState.supplementalPrompt||"":""}\n${memoryState.summaryPrompt?.trim() || DEFAULT_STORY_SUMMARY_PROMPT}\n${memoryState.supplementalPosition!=="before"?memoryState.supplementalPrompt||"":""}\n\n【旧记忆】\n（已有累计摘要）\n【新增分段摘要】\n（本段独立摘要）`)} style={{padding:8,border:"1px solid #ccc",borderRadius:7}}>预览累计摘要请求模板</button>
-              </div>
-            </details>
-            <details><summary>独立分段摘要提示词</summary><textarea rows={8} style={{width:"100%"}} value={memoryState.segmentPrompt??DEFAULT_SEGMENT_PROMPT} onChange={e=>setMemoryState({...memoryState,segmentPrompt:e.target.value})}/><button onClick={()=>setMemoryState({...memoryState,segmentPrompt:DEFAULT_SEGMENT_PROMPT})}>恢复默认</button></details>
-            <details><summary>独立补充指令</summary><small>仅注入摘要请求的指令部分，不进入剧情正文或向量查询。</small><select value={memoryState.supplementalPosition??"after"} onChange={e=>setMemoryState({...memoryState,supplementalPosition:e.target.value as "before"|"after"})}><option value="before">摘要模板之前</option><option value="after">摘要模板之后、素材之前</option></select><textarea rows={6} style={{width:"100%"}} value={memoryState.supplementalPrompt??""} onChange={e=>setMemoryState({...memoryState,supplementalPrompt:e.target.value})}/><button onClick={()=>setMemoryState({...memoryState,supplementalPrompt:""})}>清空</button></details>
-            <div>当前累计摘要（可编辑）</div>
-            <textarea rows={10} value={memoryState.summaryText} onChange={e=>setMemoryState({...memoryState,summaryText:e.target.value})} style={{width:"100%",boxSizing:"border-box",padding:8,border:"1px solid #bcb5aa",borderRadius:8,color:"#333",background:"white"}} />
-            <small>摘要覆盖至：{memoryState.coveredThroughMessageId || "尚未生成"}；当前校验：{resolveStoryMemoryContext(messages,memoryState).valid?"有效":"未启用或需重新整理"}</small>
-            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <button disabled={memoryBusy||memoryRunning} onClick={()=>void persistMemory(memoryState)} style={{padding:10,background:"#d7e8d8",borderRadius:8}}>保存设置与摘要</button>
-              <button disabled={memoryBusy||memoryRunning} onClick={()=>void regenerateMemory()} style={{padding:10,background:"#dce6ff",borderRadius:8}}>{memoryBusy||memoryRunning?"正在分段总结…":memoryState.task&&memoryState.task.status!=="done"?"继续 / 重试摘要":"生成 / 更新摘要（调用 API）"}</button>
-              <button disabled={memoryBusy||memoryRunning} onClick={()=>void regenerateMemory(true)} style={{padding:10,border:"1px solid #ccc",borderRadius:8}}>从原文重新整理</button>
-            </div>
-            <strong>历史版本</strong>
-            {memoryRevisions.slice(0,12).map(rev=><button key={rev.id} onClick={()=>{if(confirm("恢复此版本的摘要和覆盖范围？请记得保存。")) setMemoryState({...memoryState,summaryText:rev.summaryText,coveredThroughMessageId:rev.coveredThroughMessageId,coveredDigest:rev.coveredDigest});}} style={{textAlign:"left",padding:8,border:"1px solid #ddd",borderRadius:6}}>{new Date(rev.createdAt).toLocaleString()} · {rev.source} · {rev.summaryText.slice(0,35)}…</button>)}
-            <small>原始剧情消息不会被删除。若修改或删除已压缩的旧正文，摘要自动失效并恢复发送原文，避免静默丢失剧情。</small>
-          </div>
-        </div>
-      )}
+      {memoryOpen && activeSessionId && <MemoryWorkspace key={activeSessionId} sessionId={activeSessionId} getHistory={()=>loadStoryMessages(activeSessionId)} getFallbackApi={()=>{const bound=resolveBinding(loadBindingConfig(),activeCharacterId,"story");return resolveAuxiliaryApiConfig("memorySummaryApiConfigId")||loadApiConfigs().find(c=>c.id===bound.apiConfigId);}} onClose={()=>setMemoryOpen(false)} onChanged={()=>void loadStoryMemory(activeSessionId).then(setMemoryState)}/>}
       {cssModalOpen && (
         <div style={{
           position: "absolute", inset: 0, zIndex: 300,
