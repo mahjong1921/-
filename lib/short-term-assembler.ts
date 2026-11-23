@@ -11,7 +11,8 @@ import { resolveUserIdentity } from "./settings-storage";
 import { loadMemoryConfig } from "./memory-storage";
 import type { MemoryConfig } from "./memory-types";
 import { estimateTokens } from "./token-counter";
-import { loadStoryProjectionEntries } from "./story-storage";
+import { loadStoryProjectionEntries, loadStorySessions, loadStoryMessages } from "./story-storage";
+import { readStoryMemoryMirror, resolveStoryMemoryContext, extractTaggedStorySummary } from "./story-memory-manager";
 import { buildTwoLevelMomentThreads } from "./moments-comment-threading";
 import { loadVnProjectionEntries } from "./vn-storage";
 import { loadMapProjectionEntries, loadMapSharedProjectionEntries } from "./map-storage";
@@ -167,6 +168,7 @@ export function loadNativeTimeline(
         excludeOfflineSessionId?: string;
         timeAware?: boolean;
         promptTimestampOptions?: PromptTimestampOptions;
+        excludeDedicatedStory?: boolean;
     }
 ): NativeTimelineEntry[] {
     const entries: NativeTimelineEntry[] = [];
@@ -513,16 +515,35 @@ export function loadNativeTimeline(
     }
 
     // ── Story projections ──
+    const storySession = loadStorySessions().find(s => s.characterId === characterId);
+    const storyMemory = storySession ? readStoryMemoryMirror(storySession.id) : null;
+    const storyHistory = storySession ? loadStoryMessages(storySession.id) : [];
+    const storyResolved = storyMemory ? resolveStoryMemoryContext(storyHistory, storyMemory) : null;
+    const storyMode = storyMemory?.crossStoryToChat ?? "summary-recent";
+    // The cross-scene projection is compact; the original story messages stay in storage.
+    const summaryProjection = storyResolved?.valid && storyMode !== "full" ? [{
+        id: `story_memory_${storySession!.id}`,
+        timestamp: storyHistory[storyHistory.length - 1]?.createdAt ?? "",
+        content: `[累计剧情记忆] ${storyResolved.summary}`,
+    }] : [];
+    const recentTagged = storyResolved?.valid && storyMode === "summary-recent"
+        ? storyHistory.filter(m => m.role === "assistant").slice(-Math.max(1,storyMemory?.recentTurns ?? 6))
+            .filter(m => storyHistory.indexOf(m) > storyHistory.findIndex(x => x.id === storyMemory!.coveredThroughMessageId))
+            .map(m => ({ id:`story_recent_${m.id}`, timestamp:m.createdAt, content:extractTaggedStorySummary(m.rawContent) }))
+            .filter(m => m.content)
+        : [];
     const storyEntries = loadStoryProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
         userName,
         charName,
     });
-    for (const storyEntry of storyEntries) {
+    for (const storyEntry of (options?.appId === "story" || (options?.excludeDedicatedStory && storyResolved?.valid) ? [] : storyResolved?.valid && storyMode !== "full" ? [...summaryProjection, ...recentTagged] : storyEntries)) {
+        if (options?.afterTimestamp && storyEntry.timestamp <= options.afterTimestamp) continue;
         entries.push({
             id: storyEntry.id,
             sourceApp: "story",
             sourceDetail: "story",
+            sessionId: storySession?.id,
             timestamp: storyEntry.timestamp,
             content: formatStoredPromptEventContent(storyEntry.content, {
                 label: "事件",
@@ -962,7 +983,13 @@ export function prepareShortTermContext(
     const raw: { tag: string; order: number; entries: NativeTimelineEntry[] }[] = [];
 
     // All moments-related entries now participate in the unified recent timeline.
-    const momentsEntries = timeline.filter(e => e.sourceApp === "moments");
+    const momentsAll = timeline.filter(e => e.sourceApp === "moments");
+    const sceneSession = loadStorySessions().find(s => s.characterId === characterId);
+    const sceneMode = sceneSession ? (readStoryMemoryMirror(sceneSession.id)?.crossMoments ?? "summary-recent") : "summary-recent";
+    const momentsEntries = sceneMode === "full" ? momentsAll : sceneMode === "recent" ? momentsAll.slice(-6) : [
+        ...(momentsAll.length > 6 ? [{...momentsAll[momentsAll.length - 7], id:"moments_older_digest", content:`[更早朋友圈摘要（原文节选）]\n${momentsAll.slice(0,-6).map(e=>e.content.slice(0,140)).join("\n").slice(-1400)}`}] : []),
+        ...momentsAll.slice(-6),
+    ];
     if (momentsEntries.length > 0) {
         raw.push({ tag: "recent_moments", order: FEATURE_ORDER.moments, entries: momentsEntries });
     }

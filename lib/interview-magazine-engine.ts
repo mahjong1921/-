@@ -1,4 +1,5 @@
 import { jsonrepair } from "jsonrepair";
+import { buildInterviewStoryMemory } from "./story-memory-manager";
 
 import { loadCharacters } from "./character-storage";
 import type { Character } from "./character-types";
@@ -552,6 +553,7 @@ export async function generateCharacterInterviewAnswer(params: {
     .map((message) => message.content)
     .join("\n\n");
 
+  const storyMemoryForGuest = await buildInterviewStoryMemory(guest.character.id);
   const llmMessages = assemblePromptPayload({
     character: guest.character,
     history: [],
@@ -576,6 +578,7 @@ export async function generateCharacterInterviewAnswer(params: {
     interviewCharacterAnswerHistory: characterAnswerHistory,
   });
 
+  if (storyMemoryForGuest) llmMessages.unshift({role:"system",content:storyMemoryForGuest});
   const raw = await sendLLMRequest(
     guest.apiConfig,
     guest.preset,
@@ -723,6 +726,7 @@ export async function previewInterviewMagazinePromptPayload(params: {
 
   const guest = context.primaryGuest;
   const transcriptText = formatInterviewTranscript(transcript, context.character.name, context.userName, getCharacterNameMap(context));
+  const storyMemoryForPreview = await buildInterviewStoryMemory(guest.character.id);
   const llmMessages = assemblePromptPayload({
     character: guest.character,
     history: [],
@@ -746,6 +750,7 @@ export async function previewInterviewMagazinePromptPayload(params: {
     interviewUserAnswer: "",
     interviewCharacterAnswerHistory: "",
   });
+  if (storyMemoryForPreview) llmMessages.unshift({role:"system",content:storyMemoryForPreview});
   return {
     messages: previewMessagesForApi(guest.apiConfig, guest.preset, llmMessages),
     characterName: `在场:${guest.character.name}`,
