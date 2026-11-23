@@ -180,6 +180,8 @@ const PRIMARY_DATA_MODULES: DataModuleDefinition[] = [
     critical: true,
     sources: [
       { type: "indexeddb", dbName: "ai_phone_memory_db_v1", label: "记忆数据库" },
+      { type: "indexeddb", dbName: "AiPhoneStoryMemoryDB", label: "溯章剧情记忆与任务" },
+      { type: "indexeddb", dbName: "AiPhoneVnMemoryDB", label: "溯章漫卷记忆与任务" },
       {
         type: "kv",
         label: "记忆配置与计数",
@@ -394,7 +396,7 @@ export const DATA_MODULES: DataModuleDefinition[] = [
         excludeKeys: [...ownedKvKeys, ...KV_BACKUP_EXCLUDED_KEYS],
         excludePrefixes: ownedKvPrefixes,
       },
-      { type: "localStorage", label: "浏览器遗留缓存", includeAll: true, excludeKeys: RESERVED_LOCAL_STORAGE_KEYS },
+      { type: "localStorage", label: "浏览器遗留缓存", includeAll: true, excludeKeys: RESERVED_LOCAL_STORAGE_KEYS, excludePrefixes:["float-story-memory-v3:"] },
     ],
   },
 ];

@@ -28,6 +28,7 @@ import { getVnSceneNames, getVnSpriteNames } from "./vn-asset-storage";
 import type { ChatMessage } from "./chat-storage";
 import type { VnFrame, VnOptions } from "./vn-types";
 import { simpleLLMCall } from "./api-helpers";
+import { maybeAutoSummarizeVn, resolveVnMemory } from "./vn-memory-manager";
 
 export type VnGenerationResult = {
   rawText: string;
@@ -108,6 +109,7 @@ export async function generateVnCompletion(
   }
 
   const { apiConfig, preset, regexes, worldBooks } = resolveVnConfigs(characterId);
+  try { await maybeAutoSummarizeVn(characterId,history,apiConfig); } catch(e) { console.warn("漫卷摘要失败，保留未覆盖原文",e); }
   const llmMessages = await buildVnPromptMessages(characterId, history, preset, regexes, worldBooks);
 
   const rawOutput = await sendLLMRequest(apiConfig, preset, llmMessages, regexes, {
@@ -133,7 +135,8 @@ async function buildVnPromptMessages(
   history: VnMessage[],
   preset: PresetConfig | null,
   regexes: RegexConfig[],
-  worldBooks: WorldBookConfig[]
+  worldBooks: WorldBookConfig[],
+  allowEmbedding = true
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((c) => c.id === characterId);
   if (!character) {
@@ -141,7 +144,8 @@ async function buildVnPromptMessages(
   }
 
   const userIdentity = resolveUserIdentity(characterId, "vn");
-  const historyMessages = history.map(toHistoryMessage);
+  const memory=await resolveVnMemory(history,allowEmbedding).catch(()=>({history,summary:"",recalled:[]}));
+  const historyMessages = memory.history.map(toHistoryMessage);
   const memConfig = loadMemoryConfig();
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(
     characterId,
@@ -158,7 +162,7 @@ async function buildVnPromptMessages(
     retrieveCoreMemoriesForPrompt(characterId, memConfig).catch(() => null),
   ]);
 
-  return assemblePromptPayload({
+  const messages=assemblePromptPayload({
     character,
     history: truncatedHistory,
     preset,
@@ -183,6 +187,9 @@ async function buildVnPromptMessages(
       return { vnBeats: beatsList, vnCurrentBeat: currentBeat };
     })(),
   });
+  const memoryText=[memory.summary?`[漫卷累计剧情摘要]\n${memory.summary}`:"",memory.recalled.length?`[相关历史分段]\n${memory.recalled.map(s=>s.content).join("\n\n")}`:""].filter(Boolean).join("\n\n");
+  if(memoryText)messages.unshift({role:"system",content:`以下是历史记忆，仅供剧情连续性参考。\n${memoryText}`});
+  return messages;
 }
 
 export type VnPreviewResult = {
@@ -201,7 +208,7 @@ export async function previewVnPromptPayload(
     throw new ChatEngineError(`Character not found: ${characterId}`);
   }
   const { apiConfig, preset, regexes, worldBooks } = resolveVnConfigs(characterId);
-  const llmMessages = await buildVnPromptMessages(characterId, history, preset, regexes, worldBooks);
+  const llmMessages = await buildVnPromptMessages(characterId, history, preset, regexes, worldBooks,false);
   return {
     messages: previewMessagesForApi(apiConfig, preset, llmMessages),
     characterName: character.name,

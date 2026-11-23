@@ -1,5 +1,6 @@
 import Dexie from "dexie";
 import { formatChatTimestamp } from "./llm-prompt-assembler";
+import { storyCoveredDigest } from "./story-memory-manager";
 import type { VnSession, VnMessage, VnChapterMeta, VnLayoutPrefs, VnBeat, VnFrameAudio } from "./vn-types";
 export type { VnSession, VnMessage, VnChapterMeta, VnLayoutPrefs, VnBeat };
 
@@ -324,6 +325,7 @@ export function updateChapterSummary(
   chapters[chapterIndex] = {
     ...ch,
     summaryContent: summary,
+    summaryDigest: storyCoveredDigest(loadVnMessagesForChapter(sessionId,chapterIndex)),
     summaryTimestamp: new Date().toISOString(),
   };
 

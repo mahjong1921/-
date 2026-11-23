@@ -34,6 +34,7 @@ export type VnChapterMeta = {
   archived: boolean;
   summaryContent?: string;
   summaryTimestamp?: string;
+  summaryDigest?: string;
   beats?: VnBeat[];
   activeBeatIndex?: number;
 };
